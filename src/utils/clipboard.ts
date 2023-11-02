@@ -9,3 +9,12 @@ export const copySnippetToClipboard = async (text: string): Promise<boolean> => 
     return false;
   }
 };
+export const getSnippetFromClipboard = async (): Promise<string> => {
+  try {
+    return await navigator.clipboard.readText();
+  } catch (err) {
+    console.error("Failed to get clipboard", err);
+
+    return Promise.reject();
+  }
+};

@@ -10,6 +10,7 @@ import { FluxNodeType, FluxNodeData, ReactFlowNodeTypes } from "./types";
 import { getFluxNodeTypeColor } from "./color";
 import { generateNodeId } from "./nodeId";
 import { formatAutoLabel } from "./prompt";
+import { defaultNodeHandleId } from "../components/nodes/TemplateNode";
 
 /*//////////////////////////////////////////////////////////////
                          CONSTRUCTORS
@@ -33,6 +34,7 @@ export function newFluxNode({
   return {
     id: id ?? generateNodeId(),
     position: { x, y },
+    type: ReactFlowNodeTypes.Template,
     style: {
       background: getFluxNodeTypeColor(fluxNodeType),
     },
@@ -139,6 +141,21 @@ export function modifyFluxNodeText(
 
     copy.data.text = text;
 
+    if (asHuman) {
+      const divText = text.split('{').slice(1);
+      const invalidPrompt = divText.filter(t => {
+        return t.indexOf('}') < 0;
+      }).map(t => t.indexOf(''));
+      if (invalidPrompt.length === 0) {
+        const variables = divText.map(t => ({id: t.split('}')[0]}));
+        copy.data.handles = variables;
+      } else {
+        copy.data.handles = undefined;
+        //return node;
+        //throw Error(`Invalid prompt template. The template is missmatching curly brackets {}`);
+      }
+    }
+
     // If the node's fluxNodeType is GPT and we're changing
     // it as a human then its type becomes GPT + Human.
     if (asHuman && copy.data.fluxNodeType === FluxNodeType.GPT) {
@@ -235,6 +252,11 @@ export function deleteSelectedFluxNodes(
 ): Node<FluxNodeData>[] {
   return existingNodes.filter((node) => !node.selected);
 }
+export function deleteSelectedFluxEdges(
+  existingEdges: Edge[]
+): Edge[] {
+  return existingEdges.filter((edge) => !edge.selected);
+}
 
 export function markOnlyNodeAsSelected(
   existingNodes: Node<FluxNodeData>[],
@@ -265,7 +287,7 @@ export function getFluxNodeGPTChildren(
     (node) =>
       (node.data.fluxNodeType === FluxNodeType.GPT ||
         node.data.fluxNodeType === FluxNodeType.TweakedGPT) &&
-      getFluxNodeParent(existingNodes, existingEdges, node.id)?.id === id
+      getFluxNodeParents(existingNodes, existingEdges, node.id).some(n => n.id === id)
   );
 }
 
@@ -275,7 +297,7 @@ export function getFluxNodeChildren(
   id: string
 ) {
   return existingNodes.filter(
-    (node) => getFluxNodeParent(existingNodes, existingEdges, node.id)?.id === id
+    (node) => getFluxNodeParents(existingNodes, existingEdges, node.id).some(n => n.id === id)
   );
 }
 
@@ -284,17 +306,22 @@ export function getFluxNodeSiblings(
   existingEdges: Edge[],
   id: string
 ): Node<FluxNodeData>[] {
-  const parent = getFluxNodeParent(existingNodes, existingEdges, id);
+  const parents = getFluxNodeParents(existingNodes, existingEdges, id);
 
-  if (!parent) return [];
+  if (!parents.length) return [];
 
-  return getFluxNodeChildren(existingNodes, existingEdges, parent.id);
+  return (
+    parents
+    .map(parent => getFluxNodeChildren(existingNodes, existingEdges, parent.id))
+    .reduce((p, c) => [...c, ...p], [])
+  );
 }
 
-export function getFluxNodeParent(
+export function getFluxHandleParent(
   existingNodes: Node<FluxNodeData>[],
   existingEdges: Edge[],
-  id: string
+  nodeId: string,
+  handleId: string
 ): Node<FluxNodeData> | undefined {
   let edge: Edge | undefined;
 
@@ -303,7 +330,7 @@ export function getFluxNodeParent(
   for (let i = existingEdges.length - 1; i >= 0; i--) {
     const e = existingEdges[i];
 
-    if (e.target === id) {
+    if (e.target === nodeId && e.targetHandle === handleId) {
       edge = e;
       break;
     }
@@ -313,7 +340,25 @@ export function getFluxNodeParent(
 
   return existingNodes.find((node) => node.id === edge!.source);
 }
+export function getFluxNodeParents(
+  existingNodes: Node<FluxNodeData>[],
+  existingEdges: Edge[],
+  nodeId: string
+): Array<Node<FluxNodeData>> {
+  let nodes: Node<FluxNodeData>[] = [];
 
+  // We iterate in reverse to ensure we don't try to route
+  // through a stale (now hidden) edge to find the parent.
+  for (let i = existingEdges.length - 1; i >= 0; i--) {
+    const e = existingEdges[i];
+
+    if (e.target === nodeId) {
+      const node = existingNodes.find((node) => node.id === e!.source);
+      if (node) nodes.push(node);
+    }
+  }
+  return nodes;
+}
 // Get the lineage of the node,
 // where index 0 is the node,
 // index 1 is the node's parent,
@@ -324,18 +369,51 @@ export function getFluxNodeLineage(
   existingNodes: Node<FluxNodeData>[],
   existingEdges: Edge[],
   id: string
-): Node<FluxNodeData>[] {
-  const lineage: Node<FluxNodeData>[] = [];
+): Array<Node<FluxNodeData>[]> {
+  const lineage: Array<Node<FluxNodeData>[]> = [];
 
-  let currentNode = getFluxNode(existingNodes, id);
-
-  while (currentNode) {
+  let currentNode = [];
+  const node = getFluxNode(existingNodes, id);
+  if (node) {
+    currentNode.push(node);
+  }
+  while (currentNode.length > 0) {
     lineage.push(currentNode);
 
-    currentNode = getFluxNodeParent(existingNodes, existingEdges, currentNode.id);
+    currentNode = (
+      currentNode
+      .map(node => getFluxNodeParents(existingNodes, existingEdges, node.id))
+      .reduce((allParents, nodeParents) => {
+        const newParents = [...allParents, ...nodeParents];
+        // Remove duplicates in case of uknown edges
+        return (
+          newParents
+          .filter((node, i) => newParents.findIndex(n => n.id === node.id) === i)
+        );
+      }, [])
+    );
   }
-
   return lineage;
+}
+
+
+export function isEdgeMessageType(edge: Edge): boolean {
+  return edge.targetHandle === undefined || edge.targetHandle === defaultNodeHandleId;
+}
+
+export function getMessageLineage(
+  lineage: Array<Node<FluxNodeData>[]>,
+  existingEdges: Edge[],
+) {
+  const messageLineage = lineage[0];
+  for (let i = 1; i < lineage.length; i++) {
+    const nodes = lineage[i];
+    const node = nodes.find(n => existingEdges.find(e => e.source === n.id && e.target === messageLineage[messageLineage.length - 1].id && isEdgeMessageType(e)))
+    if (node) {
+      messageLineage.push(node);
+    }
+  }
+  return messageLineage;
 }
 
 export function isFluxNodeInLineage(
@@ -345,13 +423,13 @@ export function isFluxNodeInLineage(
 ): boolean {
   const lineage = getFluxNodeLineage(existingNodes, existingEdges, nodeToGetLineageOf);
 
-  return lineage.some((node) => node.id === nodeToCheck);
+  return lineage.some((nodes) => nodes.some(node => node.id === nodeToCheck));
 }
 
 export function getConnectionAllowed(
   existingNodes: Node<FluxNodeData>[],
   existingEdges: Edge[],
-  { source, target }: { source: string; target: string }
+  { source, target, targetHandle }: { source: string; target: string, targetHandle: string }
 ): boolean {
   return (
     // Check the lineage of the source node to make
@@ -360,7 +438,7 @@ export function getConnectionAllowed(
       nodeToCheck: target,
       nodeToGetLineageOf: source,
       // Check if the target node already has a parent.
-    }) && getFluxNodeParent(existingNodes, existingEdges, target) === undefined
+    }) && getFluxHandleParent(existingNodes, existingEdges, target, targetHandle) === undefined
   );
 }
 
@@ -370,15 +448,14 @@ export function getConnectionAllowed(
 
 export function displayNameFromFluxNodeType(
   fluxNodeType: FluxNodeType,
-  isGPT4?: boolean
 ): string {
   switch (fluxNodeType) {
     case FluxNodeType.User:
       return "User";
     case FluxNodeType.GPT:
-      return isGPT4 === undefined ? "GPT" : isGPT4 ? "GPT-4" : "GPT-3.5";
+      return "GPT";
     case FluxNodeType.TweakedGPT:
-      return displayNameFromFluxNodeType(FluxNodeType.GPT, isGPT4) + " (edited)";
+      return displayNameFromFluxNodeType(FluxNodeType.GPT) + " (edited)";
     case FluxNodeType.System:
       return "System";
   }

@@ -7,19 +7,24 @@ import { NodeProps } from "reactflow";
 import { ReactFlowNodeTypes, Settings } from "./types";
 
 import { LabelUpdaterNode } from "../components/nodes/LabelUpdaterNode";
+import { TemplateNode } from "../components/nodes/TemplateNode";
 
 export const REACT_FLOW_NODE_TYPES: Record<
   ReactFlowNodeTypes,
   (args: NodeProps) => JSX.Element
 > = {
   LabelUpdater: LabelUpdaterNode,
+  Template: TemplateNode,
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  temp: 1.2,
-  n: 3,
+  models: [{
+    modelSource: 'openai',
+    temp: 1.2,
+    n: 3,
+    model: "gpt-3.5-turbo",
+  }],
   autoZoom: true,
-  model: "gpt-3.5-turbo",
   defaultPreamble: `You are ChatGPT, a large language model trained by OpenAI. Answer as concisely as possible. Knowledge cutoff: 2021-09 Current date: ${
     new Date().toISOString().split("T")[0]
   }`,

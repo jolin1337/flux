@@ -24,6 +24,8 @@ import paradigm from "/paradigm.svg";
 
 export function NavigationBar({
   newUserNodeLinkedToANewSystemNode,
+  load,
+  download,
   newConnectedToSelectedNode,
   submitPrompt,
   regenerate,
@@ -42,6 +44,8 @@ export function NavigationBar({
   onOpenSettingsModal,
 }: {
   newUserNodeLinkedToANewSystemNode: () => void;
+  load: (replace: boolean) => void;
+  download: () => void;
   newConnectedToSelectedNode: (nodeType: FluxNodeType) => void;
   submitPrompt: () => void;
   regenerate: () => void;
@@ -122,6 +126,26 @@ export function NavigationBar({
             File
           </MenuButton>
           <MenuList width="300px">
+            <MenuGroup title="Backup">
+              <MenuItem
+                command={`⇧${modifierKeyText}P`}
+                onClick={download}
+              >
+                Download current workspace
+              </MenuItem>
+              <MenuItem
+                command={`⇧${modifierKeyText}P`}
+                onClick={() => load(true)}
+              >
+                Replace current workspace with local file
+              </MenuItem>
+              <MenuItem
+                command={`⇧${modifierKeyText}P`}
+                onClick={() => load(false)}
+              >
+                Append current workspace with local file
+              </MenuItem>
+            </MenuGroup>
             <MenuGroup title="Trees">
               <MenuItem
                 command={`⇧${modifierKeyText}P`}

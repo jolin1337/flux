@@ -1,7 +1,6 @@
 import { MIXPANEL_TOKEN } from "../main";
-import { isValidAPIKey } from "../utils/apikey";
 import { Column, Row } from "../utils/chakra";
-import { copySnippetToClipboard } from "../utils/clipboard";
+import { copySnippetToClipboard, getSnippetFromClipboard } from "../utils/clipboard";
 import { getFluxNodeTypeColor, getFluxNodeTypeDarkColor } from "../utils/color";
 import { getPlatformModifierKey, getPlatformModifierKeyText } from "../utils/platform";
 import {
@@ -33,7 +32,7 @@ import {
   modifyFluxNodeText,
   modifyReactFlowNodeProperties,
   getFluxNodeChildren,
-  getFluxNodeParent,
+  getFluxNodeParents,
   getFluxNodeSiblings,
   markOnlyNodeAsSelected,
   deleteFluxNode,
@@ -41,12 +40,14 @@ import {
   addUserNodeLinkedToASystemNode,
   getConnectionAllowed,
   setFluxNodeStreamId,
+  deleteSelectedFluxEdges,
 } from "../utils/fluxNode";
 import { useLocalStorage } from "../utils/lstore";
 import { mod } from "../utils/mod";
 import { getAvailableChatModels } from "../utils/models";
 import { generateNodeId, generateStreamId } from "../utils/nodeId";
 import { messagesFromLineage, promptFromLineage } from "../utils/prompt";
+import makeRequest from "../utils/api";
 import { getQueryParam, resetURL } from "../utils/qparams";
 import { useDebouncedWindowResize } from "../utils/resize";
 import {
@@ -58,14 +59,12 @@ import {
   ReactFlowNodeTypes,
 } from "../utils/types";
 import { Prompt } from "./Prompt";
-import { APIKeyModal } from "./modals/APIKeyModal";
 import { SettingsModal } from "./modals/SettingsModal";
 import { BigButton } from "./utils/BigButton";
 import { NavigationBar } from "./utils/NavigationBar";
 import { CheckCircleIcon } from "@chakra-ui/icons";
 import { Box, useDisclosure, Spinner, useToast } from "@chakra-ui/react";
 import mixpanel from "mixpanel-browser";
-import { CreateCompletionResponseChoicesInner, OpenAI } from "openai-streams";
 import { Resizable } from "re-resizable";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useBeforeunload } from "react-beforeunload";
@@ -83,9 +82,9 @@ import ReactFlow, {
   ReactFlowJsonObject,
   useReactFlow,
   updateEdge,
+  useUpdateNodeInternals,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { yieldStream } from "yield-stream";
 
 function App() {
   const toast = useToast();
@@ -161,6 +160,7 @@ function App() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const updateNodeInternals = useUpdateNodeInternals();
 
   const edgeUpdateSuccessful = useRef(true);
 
@@ -173,6 +173,7 @@ function App() {
       !getConnectionAllowed(nodes, edges, {
         source: newConnection.source!,
         target: newConnection.target!,
+        targetHandle: newConnection.targetHandle!,
       })
     )
       return;
@@ -199,6 +200,7 @@ function App() {
       !getConnectionAllowed(nodes, edges, {
         source: connection.source!,
         target: connection.target!,
+        targetHandle: connection.targetHandle!,
       })
     )
       return;
@@ -227,37 +229,77 @@ function App() {
       );
     }
   };
+  const download = () => {
+    try {
+      if (reactFlow) {
+        const rawFlow = JSON.stringify(reactFlow.toObject(), null, 2);
+        const blob = new Blob([rawFlow], { type: "application/json" });
+        const href = URL.createObjectURL(blob);
+        // create "a" HTLM element with href to file
+        const link = window.document.createElement("a");
+        link.href = href;
+        link.download = `reactflow${new Date().toString()}.json`;
+        window.document.body.appendChild(link);
+        link.click();
+        
+        // clean up "a" element & remove ObjectURL
+        window.document.body.removeChild(link);
+        URL.revokeObjectURL(href);
+      }
+    } catch(e) {
+      
+    }
+  };
+  const loadFile = (replace: boolean = false) => {
+    var input = window.document.createElement("input");
+    input.setAttribute("type", "file");
+    input.addEventListener('change', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (input.files) {
+        const text = await input.files[0].text();
+        load(text, replace);
+      }
+    }, false);
+    
+    input.click();
 
-  // Auto save.
-  const isSavingReactFlow = useDebouncedEffect(
-    save,
-    1000, // 1 second.
-    [reactFlow, nodes, edges]
-  );
-
-  // Auto restore on load.
-  useEffect(() => {
+  };
+  const load = (rawFlow: string, replace: boolean = true) => {
     if (reactFlow) {
-      const rawFlow = localStorage.getItem(REACT_FLOW_LOCAL_STORAGE_KEY);
-
       const flow: ReactFlowJsonObject = rawFlow ? JSON.parse(rawFlow) : null;
 
       // Get the content of the newTreeWith query param.
       const content = getQueryParam(NEW_TREE_CONTENT_QUERY_PARAM);
-
+      
       if (flow) {
-        setEdges(flow.edges || []);
+        let {nodes: newNodes, edges: newEdges} = flow; // For brevity.
+        if (!replace) {
+          const maxX = Math.max(...nodes.map(n => n.position.x));
+          newNodes = nodes.concat(newNodes.map(n => newFluxNode({
+            id: n.id,
+            x: n.position.x + maxX + 50,
+            y: n.position.y,
+            fluxNodeType: n.data.fluxNodeType,
+            text: n.data.text,
+            streamId: n.data.streamId,
+          })));
+          newEdges = edges.concat(newEdges);
+        }
+        newEdges = newEdges.filter((e, i) => (
+          newNodes.some(n => n.id === e.target) &&
+          newNodes.some(n => n.id === e.source)
+        ));
+        setEdges(newEdges || []);
         setViewport(flow.viewport);
 
-        const nodes = flow.nodes; // For brevity.
 
-        if (nodes.length > 0) {
+        if (newNodes.length > 0) {
           // Either the first selected node we find, or the first node in the array.
-          const toSelect = nodes.find((node) => node.selected)?.id ?? nodes[0].id;
+          const toSelect = newNodes.find((node) => node.selected)?.id ?? newNodes[0].id;
 
           // Add the nodes to the React Flow array and select the node.
-          selectNode(toSelect, () => nodes);
-
+          selectNode(toSelect, () => newNodes);
           // If there was a newTreeWith query param, create a new tree with that content.
           // We pass false for forceAutoZoom because we'll do it 500ms later to avoid lag.
           if (content) newUserNodeLinkedToANewSystemNode(content, false);
@@ -272,6 +314,19 @@ function App() {
 
       resetURL(); // Get rid of the query params.
     }
+  };
+
+  // Auto save.
+  const isSavingReactFlow = useDebouncedEffect(
+    save,
+    1000, // 1 second.
+    [reactFlow, nodes, edges]
+  );
+
+  // Auto restore on load.
+  useEffect(() => {
+    const rawFlow = localStorage.getItem(REACT_FLOW_LOCAL_STORAGE_KEY);
+    rawFlow && load(rawFlow);
   }, [reactFlow]);
 
   /*//////////////////////////////////////////////////////////////
@@ -283,12 +338,12 @@ function App() {
   const submitPrompt = async (overrideExistingIfPossible: boolean) => {
     takeSnapshot();
 
-    const responses = settings.n;
-    const temp = settings.temp;
-    const model = settings.model;
+    const model = settings.models.find(m => m.model === selectedModel);
+    if (!model) throw Error("Unable to find model: " + selectModel)
+    const responses = settings.n || 1;
 
     const parentNodeLineage = selectedNodeLineage;
-    const parentNode = selectedNodeLineage[0];
+    const parentNode = selectedNodeLineage[0][0];
 
     const newNodes = [...nodes];
 
@@ -328,7 +383,6 @@ function App() {
         const id = generateNodeId();
 
         if (i === 0) firstCompletionId = id;
-
         // Otherwise, we'll create a new node.
         newNodes.push(
           newFluxNode({
@@ -362,35 +416,15 @@ function App() {
     if (firstCompletionId === undefined) throw new Error("No first completion id!");
 
     (async () => {
-      const stream = await OpenAI(
+      const abortController = new AbortController();
+      const stream = await makeRequest(
         "chat",
         {
-          model,
+          settings: model,
           n: responses,
-          temperature: temp,
-          messages: messagesFromLineage(parentNodeLineage, settings),
+          messages: messagesFromLineage(parentNodeLineage, edges, settings),
         },
-        { apiKey: apiKey!, mode: "raw" }
-      );
-
-      const DECODER = new TextDecoder();
-
-      const abortController = new AbortController();
-
-      for await (const chunk of yieldStream(stream, abortController)) {
-        if (abortController.signal.aborted) break;
-
-        try {
-          const decoded = JSON.parse(DECODER.decode(chunk));
-
-          if (decoded.choices === undefined)
-            throw new Error(
-              "No choices in response. Decoded response: " + JSON.stringify(decoded)
-            );
-
-          const choice: CreateChatCompletionStreamResponseChoicesInner =
-            decoded.choices[0];
-
+        { apiKey: apiKey!, abortController, onChunk: (choice) => {
           if (choice.index === undefined)
             throw new Error(
               "No index in choice. Decoded choice: " + JSON.stringify(choice)
@@ -413,18 +447,19 @@ function App() {
                   streamId, // This will cause a throw if the streamId has changed.
                 });
               } catch (e: any) {
+                console.error(e);
                 // If the stream id does not match,
                 // it is stale and we should abort.
                 abortController.abort(e.message);
 
-                return newerNodes;
+                return newerNodes.filter(n => !(n.data.fluxNodeType === FluxNodeType.GPT && !n.data.streamId));
               }
             });
           }
 
           // We cannot return within the loop, and we do
           // not want to execute the code below, so we break.
-          if (abortController.signal.aborted) break;
+          if (abortController.signal.aborted) return;
 
           // If the choice has a finish reason, then it's the final
           // choice and we can mark it as no longer animated right now.
@@ -442,10 +477,9 @@ function App() {
               })
             );
           }
-        } catch (err) {
-          console.error(err);
-        }
-      }
+        }}
+      );
+
 
       // If the stream wasn't aborted or was aborted due to a cancelation.
       if (
@@ -530,7 +564,7 @@ function App() {
   const completeNextWords = () => {
     takeSnapshot();
 
-    const temp = settings.temp;
+    const temp = settings.models.find(m => m.model === selectedModel)?.temperature || 1.0;
 
     const lineage = selectedNodeLineage;
     const selectedNodeId = lineage[0].id;
@@ -543,17 +577,16 @@ function App() {
     (async () => {
       // TODO: Stop sequences for user/assistant/etc?
       // TODO: Select between instruction and auto raw base models?
-      const stream = await OpenAI(
+      const stream = await makeRequest(
         "completions",
         {
           // TODO: Allow customizing.
           model: "text-davinci-003",
           temperature: temp,
-          prompt: promptFromLineage(lineage, settings),
+          prompt: promptFromLineage(lineage, edges, settings),
           max_tokens: 250,
-          stop: ["\n\n", "assistant:", "user:"],
         },
-        { apiKey: apiKey!, mode: "raw" }
+        { apiKey: apiKey! }
       );
 
       const DECODER = new TextDecoder();
@@ -612,6 +645,7 @@ function App() {
                           SELECTED NODE LOGIC
   //////////////////////////////////////////////////////////////*/
 
+  const [selectedModel, selectModel] = useState<string>();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [lastSelectedNodeId, setLastSelectedNodeId] = useState<string | null>(null);
 
@@ -705,12 +739,12 @@ function App() {
     takeSnapshot();
 
     const selectedNodes = nodes.filter((node) => node.selected);
+    const selectedEdges = edges.filter((edge) => edge.selected);
 
     if (
-      selectedNodeId && // There's a selected node under the hood.
-      (selectedNodes.length === 0 || // There are no selected nodes.
-        // There is only one selected node, and it's the selected node.
-        (selectedNodes.length === 1 && selectedNodes[0].id === selectedNodeId))
+      selectedNodeId && 
+      (selectedNodes.length === 0 || (selectedNodes.length === 1 && selectedNodes[0].id === selectedNodeId)) &&
+      selectedEdges.length === 0
     ) {
       // Try to move to sibling first.
       const hasSibling = moveToRightSibling();
@@ -721,6 +755,7 @@ function App() {
       setNodes((nodes) => deleteFluxNode(nodes, selectedNodeId));
     } else {
       setNodes(deleteSelectedFluxNodes);
+      setEdges(deleteSelectedFluxEdges);
 
       // If any of the selected nodes are the selected node, unselect it.
       if (selectedNodeId && selectedNodes.some((node) => node.id === selectedNodeId)) {
@@ -782,10 +817,10 @@ function App() {
   };
 
   const moveToParent = () => {
-    const parent = getFluxNodeParent(nodes, edges, selectedNodeId!);
+    const parents = getFluxNodeParents(nodes, edges, selectedNodeId!);
 
-    if (parent) {
-      selectNode(parent.id);
+    if (parents.length) {
+      selectNode(parents[parents.length - 1].id);
 
       if (MIXPANEL_TOKEN) mixpanel.track("Moved to parent node");
 
@@ -848,8 +883,6 @@ function App() {
     }
   });
 
-  const isGPT4 = settings.model.includes("gpt-4");
-
   // Auto save.
   const isSavingSettings = useDebouncedEffect(
     () => {
@@ -870,10 +903,16 @@ function App() {
   // modelsLoadCounter lets us discard the results of the requests if a concurrent newer one was made.
   const modelsLoadCounter = useRef(0);
   useEffect(() => {
-    if (isValidAPIKey(apiKey)) {
-      const modelsLoadIndex = modelsLoadCounter.current + 1;
+    const modelsLoadIndex = modelsLoadCounter.current + 1;
+    if (settings?.models?.length > 0) {
+      selectModel(settings.models[0]?.model);
       modelsLoadCounter.current = modelsLoadIndex;
-
+    } else {
+      onOpenSettingsModal();
+      return;
+    }
+    const model = settings.models.find(m => m.model === selectedModel);
+    if (model && model.apiKey && model.modelSource === 'openai') {
       setAvailableModels(null);
 
       (async () => {
@@ -888,27 +927,37 @@ function App() {
           });
         }
         if (modelsLoadIndex !== modelsLoadCounter.current) return;
+        
+        const openAIModels = settings.models.filter(m => m.modelSource === 'openai').map(m => m.model);
 
-        if (modelList.length === 0) modelList.push(settings.model);
+        if (modelList.length === 0) modelList = modelList.concat(openAIModels);
+        // Remove duplicates
+        modelList = modelList.filter((m, i) => i === modelList.indexOf(m));
 
         setAvailableModels(modelList);
 
-        if (!modelList.includes(settings.model)) {
-          const oldModel = settings.model;
-          const newModel = modelList.includes(DEFAULT_SETTINGS.model) ? DEFAULT_SETTINGS.model : modelList[0];
-
-          setSettings((settings) => ({ ...settings, model: newModel }));
-
-          toast({
-            title: `Model "${oldModel}" no longer available!`,
-            description: `Switched to "${newModel}"`,
-            status: "warning",
-            ...TOAST_CONFIG,
-          });
+        const missingModels = openAIModels.filter(m => !modelList.includes(m));
+        if (missingModels.length > 0) {
+          setSettings({...settings, models: settings.models.map(m => {
+            if (m.modelSource === 'openai' && !modelList.includes(m.model)) {
+              return {...m, model: modelList[0]};
+            }
+            return m;
+          })});
+          missingModels.forEach(m => {
+            toast({
+              title: `Model "${m.model}" no longer available!`,
+              description: `Switched to "${modelList[0]}"`,
+              status: "warning",
+              ...TOAST_CONFIG,
+            });
+          })
         }
       })();
+    } else {
+      setAvailableModels([]);
     }
-  }, [apiKey]);
+  }, [settings]);
 
   const isAnythingSaving = isSavingReactFlow || isSavingSettings;
   const isAnythingLoading = isAnythingSaving || (availableModels === null);
@@ -921,9 +970,10 @@ function App() {
   /*//////////////////////////////////////////////////////////////
                         COPY MESSAGES LOGIC
   //////////////////////////////////////////////////////////////*/
+  const [mouse, setMouse] = useState({x: 0, y: 0});
 
   const copyMessagesToClipboard = async () => {
-    const messages = promptFromLineage(selectedNodeLineage, settings);
+    const messages = promptFromLineage(selectedNodeLineage, edges, settings);
 
     if (await copySnippetToClipboard(messages)) {
       toast({
@@ -936,6 +986,41 @@ function App() {
     } else {
       toast({
         title: "Failed to copy messages to clipboard!",
+        status: "error",
+        ...TOAST_CONFIG,
+      });
+    }
+  };
+  const pasteMessagesFromClipboard = async () => {
+    const clipboard = await getSnippetFromClipboard();
+    const [fluxTypeStr, text] = clipboard.split(':', 2);
+    const types= {
+      user: FluxNodeType.User,
+      system: FluxNodeType.System,
+      gpt: FluxNodeType.TweakedGPT,
+      gpt_twaked: FluxNodeType.TweakedGPT,
+    };
+    const fluxNodeType = types[fluxTypeStr] || FluxNodeType.User;
+    console.log(mouse, fluxNodeType);
+    if (text) {
+      setNodes((newNodes) => {
+        newNodes = addFluxNode(newNodes, {
+          text,
+          fluxNodeType,
+          x: mouse.x,
+          y: mouse.y,
+        });
+        toast({
+          title: "Pasted message node!",
+          status: "success",
+          ...TOAST_CONFIG,
+        });
+        autoZoom();
+        return newNodes;
+      });
+    } else {
+      toast({
+        title: "Failed to paste message!",
         status: "error",
         ...TOAST_CONFIG,
       });
@@ -987,6 +1072,8 @@ function App() {
   const modifierKeyText = getPlatformModifierKeyText();
 
   useHotkeys(`${modifierKey}+s`, save, HOTKEY_CONFIG);
+  useHotkeys(`${modifierKey}+shift+o`, loadFile, HOTKEY_CONFIG);
+  useHotkeys(`${modifierKey}+shift+s`, download, HOTKEY_CONFIG);
 
   useHotkeys(
     `${modifierKey}+p`,
@@ -1031,6 +1118,7 @@ function App() {
   useHotkeys(`${modifierKey}+k`, completeNextWords, HOTKEY_CONFIG);
   useHotkeys(`${modifierKey}+backspace`, deleteSelectedNodes, HOTKEY_CONFIG);
   useHotkeys(`${modifierKey}+shift+c`, copyMessagesToClipboard, HOTKEY_CONFIG);
+  useHotkeys(`${modifierKey}+v`, pasteMessagesFromClipboard, HOTKEY_CONFIG);
 
   /*//////////////////////////////////////////////////////////////
                               APP
@@ -1038,15 +1126,11 @@ function App() {
 
   return (
     <>
-      {!isValidAPIKey(apiKey) && <APIKeyModal apiKey={apiKey} setApiKey={setApiKey} />}
-
       <SettingsModal
         settings={settings}
         setSettings={setSettings}
         isOpen={isSettingsModalOpen}
         onClose={onCloseSettingsModal}
-        apiKey={apiKey}
-        setApiKey={setApiKey}
         availableModels={availableModels}
       />
       <Column
@@ -1108,6 +1192,8 @@ function App() {
                   completeNextWords={completeNextWords}
                   undo={undo}
                   redo={redo}
+                  download={download}
+                  load={loadFile}
                   onClear={onClear}
                   copyMessagesToClipboard={copyMessagesToClipboard}
                   showRenameInput={showRenameInput}
@@ -1147,6 +1233,7 @@ function App() {
                 onEdgeUpdate={onEdgeUpdate}
                 onEdgeUpdateEnd={onEdgeUpdateEnd}
                 onConnect={onConnect}
+                onMouseMove={(e) => setMouse({x: e.clientX, y: e.clientY})}
                 nodeTypes={REACT_FLOW_NODE_TYPES}
                 // Causes clicks to also trigger auto zoom.
                 // onNodeDragStop={autoZoomIfNecessary}
@@ -1176,19 +1263,22 @@ function App() {
               <Prompt
                 settings={settings}
                 setSettings={setSettings}
-                isGPT4={isGPT4}
                 selectNode={selectNode}
                 newConnectedToSelectedNode={newConnectedToSelectedNode}
                 lineage={selectedNodeLineage}
+                existingEdges={edges}
                 onType={(text: string) => {
                   takeSnapshot();
-                  setNodes((nodes) =>
-                    modifyFluxNodeText(nodes, {
+                  setNodes((nodes) => {
+
+                    const newNodes = modifyFluxNodeText(nodes, {
                       asHuman: true,
                       id: selectedNodeId!,
                       text,
-                    })
-                  );
+                    });
+                    selectedNodeId && updateNodeInternals(selectedNodeId);
+                    return newNodes;
+                  });
                 }}
                 submitPrompt={() => submitPrompt(false)}
                 apiKey={apiKey}

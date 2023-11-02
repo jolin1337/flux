@@ -3,7 +3,7 @@ import { getFluxNodeTypeDarkColor } from "../../utils/color";
 import { DEFAULT_SETTINGS } from "../../utils/constants";
 import { Settings, FluxNodeType } from "../../utils/types";
 import { APIKeyInput } from "../utils/APIKeyInput";
-import { LabeledSelect, LabeledSlider } from "../utils/LabeledInputs";
+import { LabeledSelect, LabeledInput, LabeledSlider } from "../utils/LabeledInputs";
 
 import {
   Button,
@@ -18,6 +18,108 @@ import {
 } from "@chakra-ui/react";
 import mixpanel from "mixpanel-browser";
 import { ChangeEvent, memo } from "react";
+
+const HFInferenceSettings = function({modelSettings, updateSettings}) {
+  return (<>
+    <LabeledInput mt={4} label="API Base URL" value={modelSettings?.apiBase} setValue={(v) => {
+      updateSettings({ ...modelSettings, model: v, apiBase: v })
+      if (MIXPANEL_TOKEN) mixpanel.track("Changed Base URL");
+    }} />
+    <APIKeyInput
+      mt={4}
+      width="100%"
+      apiKey={modelSettings?.apiKey}
+      placeholder="hf_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      link="https://huggingface.co/settings/tokens"
+      setApiKey={(apiKey: string) => {
+        updateSettings({...modelSettings, apiKey});
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed apiKey");
+      }}
+    />
+
+    <LabeledSlider
+      mt={4}
+      label="Temperature (randomness)"
+      value={modelSettings?.temperature}
+      setValue={(v: number) => {
+        updateSettings({ ...modelSettings, temperature: v });
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed temperature");
+      }}
+      color={getFluxNodeTypeDarkColor(FluxNodeType.User)}
+      max={1.25}
+      min={0}
+      step={0.01}
+    />
+
+    <LabeledSlider
+      mt={3}
+      label="Max new tokens"
+      value={modelSettings?.max_new_tokens}
+      setValue={(v: number) => {
+        updateSettings({ ...modelSettings, max_new_tokens: v });
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed max new tokens");
+      }}
+      color={getFluxNodeTypeDarkColor(FluxNodeType.User)}
+      max={1024}
+      min={1}
+      step={1}
+    />
+  </>);
+};
+const OpenAISettings = function({availableModels, updateSettings, modelSettings}) {
+  return (<>
+    <LabeledSelect
+      label="Model"
+      value={modelSettings?.model}
+      options={availableModels || [modelSettings?.model]}
+      setValue={(v: string) => {
+        updateSettings({ ...modelSettings, model: v });
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed model");
+      }}
+    />
+    <APIKeyInput
+      mt={4}
+      width="100%"
+      apiKey={modelSettings?.apiKey}
+      setApiKey={(apiKey: string) => {
+        updateSettings({...modelSettings, apiKey});
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed apiKey");
+      }}
+    />
+
+    <LabeledSlider
+      mt={4}
+      label="Temperature (randomness)"
+      value={modelSettings?.temperature}
+      setValue={(v: number) => {
+        updateSettings({ ...modelSettings, temperature: v });
+        if (MIXPANEL_TOKEN) mixpanel.track("Changed temperature");
+      }}
+      color={getFluxNodeTypeDarkColor(FluxNodeType.User)}
+      max={1.25}
+      min={0}
+      step={0.01}
+    />
+
+  </>);
+};
+
+const ModelSettings = ({modelSettings, updateSettings, removeSettings, availableModels}) => {
+  return (<>
+    <LabeledSelect
+      label="Model Source"
+      value={modelSettings?.modelSource}
+      options={['openapi', 'hf-inference']}
+      setValue={(v: string) => {
+        updateSettings({ ...modelSettings, modelSource: v });
+      }}
+    />
+    {modelSettings?.modelSource === 'openapi' && <OpenAISettings updateSettings={updateSettings} modelSettings={modelSettings} availableModels={availableModels}/>}
+    {modelSettings?.modelSource === 'hf-inference' && <HFInferenceSettings updateSettings={updateSettings} modelSettings={modelSettings}/>}
+    <Button color="red" onClick={removeSettings}>Remove</Button>
+    <hr style={{margin: 15}}/>
+  </>);
+};
 
 export const SettingsModal = memo(function SettingsModal({
   isOpen,
@@ -77,41 +179,31 @@ export const SettingsModal = memo(function SettingsModal({
         <ModalHeader>Settings</ModalHeader>
         <ModalCloseButton />
         <ModalBody>
-          <LabeledSelect
-            label="Model"
-            value={settings.model}
-            options={availableModels || [settings.model]}
-            setValue={(v: string) => {
-              setSettings({ ...settings, model: v });
-
-              if (MIXPANEL_TOKEN) mixpanel.track("Changed model");
-            }}
-          />
-
-          <APIKeyInput mt={4} width="100%" apiKey={apiKey} setApiKey={setApiKey} />
-
-          <LabeledSlider
-            mt={4}
-            label="Temperature (randomness)"
-            value={settings.temp}
-            setValue={(v: number) => {
-              setSettings({ ...settings, temp: v });
-
-              if (MIXPANEL_TOKEN) mixpanel.track("Changed temperature");
-            }}
-            color={getFluxNodeTypeDarkColor(FluxNodeType.User)}
-            max={1.25}
-            min={0}
-            step={0.01}
-          />
+          {settings?.models?.map((modelSettings, i) => (
+            <ModelSettings
+              key={i}
+              modelSettings={modelSettings}
+              removeSettings={() => setSettings({...settings, models: settings.models.filter((_, j) => j !== i)})}
+              updateSettings={(newModelSettings) => {
+                const models = [...settings.models];
+                models[i] = newModelSettings;
+                setSettings({...settings, models });
+              }}
+              availableModels={availableModels}
+            />
+          ))}
+          <div>
+          <Button onClick={() => setSettings({...settings, models: [...(settings?.models || []), {modelSource: 'openai'}]})} mr={3} color="blue">
+            Add model
+          </Button>
+          </div>
 
           <LabeledSlider
             mt={3}
             label="Number of Responses"
-            value={settings.n}
+            value={settings?.n}
             setValue={(v: number) => {
               setSettings({ ...settings, n: v });
-
               if (MIXPANEL_TOKEN) mixpanel.track("Changed number of responses");
             }}
             color={getFluxNodeTypeDarkColor(FluxNodeType.User)}
@@ -119,7 +211,6 @@ export const SettingsModal = memo(function SettingsModal({
             min={1}
             step={1}
           />
-
           <Checkbox
             mt={3}
             fontWeight="bold"
